@@ -1,18 +1,166 @@
 #! /usr/bin/env ruby
 
 require 'pg'
+require 'io/console'
+require 'date'
 
-db = PG.connect(dbname: 'expenses')
+class CLI
+  attr_reader :expense_data
 
-result = db.exec "SELECT * FROM expenses;"
+  def initialize
+    @expense_data = ExpenseData.new
+  end
 
-result.each do |tuple|
-  columns = [
-    tuple['id'].rjust(3),
-    tuple['created_on'].rjust(10),
-    tuple['amount'].rjust(12),
-    tuple['memo']
-  ]
+  def run(args)
+    command = args.first
 
-  puts columns.join(' | ')
+    case command
+    when 'list'
+      expense_data.list_all_expenses
+    when 'add'
+      amount, memo = args.slice(1..2)
+      expense_data.add_expense(amount, memo)
+    when 'search'
+      query = args.last
+      expense_data.search_expenses(query)
+    when 'delete'
+      id = args.last
+      expense_data.delete_expense(id)
+    when 'clear'
+      puts "This will remove all expenses. Are you sure? (y/n) "
+      choice = $stdin.getch
+      expense_data.clear_all_expenses if choice == 'y'
+    else
+      display_help
+    end
+  end
+
+  def display_help
+    output = <<~MSG
+      An expense recording system
+
+      Commands:
+
+      add AMOUNT MEMO [DATE] - record a new expense
+      clear - delete all expenses
+      list - list all expenses
+      delete NUMBER - remove expense with id NUMBER
+      search QUERY - list expenses with a matching memo field
+    MSG
+
+    puts output
+  end
 end
+
+class ExpenseData
+  attr_reader :connection
+
+  def initialize
+    @connection = PG.connect(dbname: 'expenses')
+    setup_schema
+  end
+
+  def list_all_expenses
+    return no_expenses_msg unless expenses?
+
+    result = connection.exec "SELECT * FROM expenses;"
+    display_rows(result)
+    total = result.field_values('amount').map(&:to_f).reduce(:+).to_s
+
+    puts "=" * 32
+    puts "Total#{total.rjust(26)}"
+  end
+
+  def add_expense(amount, memo)
+    if amount && memo
+      date = Date.today
+      sql = "INSERT INTO expenses (amount, memo, created_on) VALUES ($1, $2, $3)"
+      params = [amount, memo, date]
+      connection.exec_params(sql, params)
+    else
+      puts "You must provide an amount and memo."
+    end
+  end
+
+  def search_expenses(query)
+    return no_expenses_msg unless expenses?
+
+    sql = "SELECT * FROM expenses WHERE memo ILIKE $1"
+    param = ["%#{query}%"]
+    result = connection.exec_params(sql, param)
+    display_rows(result)
+  end
+
+  def delete_expense(id)
+    expense_ids = get_expense_ids
+
+    if expense_ids.include?(id)
+      sql = "SELECT * FROM  expenses WHERE id = $1"
+      param = [id]
+      result = connection.exec_params(sql, param)
+
+      sql = "DELETE FROM expenses WHERE id = $1"
+      connection.exec_params(sql, param)
+
+      puts "The following expense has been deleted:"
+      display_rows(result)
+    else
+      puts "Please provide a valid ID."
+    end
+  end
+
+  def clear_all_expenses
+    sql = "DELETE FROM expenses"
+    connection.exec(sql)
+    puts "All expenses have been deleted."
+  end
+
+  private
+
+  def setup_schema
+    result = connection.exec <<~SQL
+      SELECT COUNT(*) FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'expenses';
+    SQL
+
+    if result.first['count'] == '0'
+      connection.exec <<~SQL
+        CREATE TABLE expenses (
+          id serial PRIMARY KEY,
+          amount numeric(6, 2) NOT NULL CHECK (amount > 0.00),
+          memo text NOT NULL CHECK (length(memo) > 1),
+          created_on date NOT NULL
+        );
+      SQL
+    end
+  end
+
+  def expenses?
+    sql = "SELECT * FROM expenses"
+    connection.exec(sql).ntuples >= 1
+  end
+
+  def no_expenses_msg
+    puts "There are no expenses logged."
+  end
+
+  def get_expense_ids
+    sql = "SELECT id FROM expenses"
+    connection.exec(sql).values.flatten
+  end
+
+  def display_rows(expenses)
+    expenses.each do |tuple|
+      columns = [
+        tuple['id'].rjust(3),
+        tuple['created_on'].rjust(10),
+        tuple['amount'].rjust(12),
+        tuple['memo']
+      ]
+
+      puts columns.join(' | ')
+    end
+  end
+end
+
+CLI.new.run(ARGV)
